@@ -16,14 +16,16 @@
 */
 
 
-#include <sstream> 
+#include <sstream>
 #include "Timer.h"
 #include "Vanity.h"
 #include "SECP256k1.h"
+#include "Base58.h"
 #include <fstream>
 #include <string>
 #include <string.h>
 #include <stdexcept>
+#include <errno.h>
 #include "hash/sha512.h"
 #include "hash/sha256.h"
 #include <thread>
@@ -76,16 +78,16 @@ void setTerminalRawMode(bool enable) {
 void setNonBlockingInput(bool enable) {
 	int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
 	if (enable) {
-		fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK); // Modalità non bloccante
+		fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK); // Modalitï¿½ non bloccante
 	}
 	else {
-		fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK); // Ripristina modalità bloccante
+		fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK); // Ripristina modalitï¿½ bloccante
 	}
 }
 
 void monitorKeypress() {
 	setTerminalRawMode(true);
-	setNonBlockingInput(true);  // Imposta stdin in modalità non bloccante
+	setNonBlockingInput(true);  // Imposta stdin in modalitï¿½ non bloccante
 
 	while (!stopMonitorKey) {
 		Timer::SleepMillis(1);
@@ -97,7 +99,7 @@ void monitorKeypress() {
 		}
 	}
 
-	setNonBlockingInput(false);  // Ripristina modalità normale
+	setNonBlockingInput(false);  // Ripristina modalitï¿½ normale
 	setTerminalRawMode(false);
 }
 #endif
@@ -260,10 +262,17 @@ void getKeySpace(const string& text, BITCRACK_PARAM* bc, Int& maxKey)
 
 void checkKeySpace(BITCRACK_PARAM* bc, Int& maxKey)
 {
-	if (bc->ksStart.IsGreater(&maxKey) || bc->ksFinish.IsGreater(&maxKey))
+	if (bc->ksStart.IsGreater(&maxKey))
 	{
-		fprintf(stderr, "[ERROR] START/END IsGreater %s \n", maxKey.GetBase16().c_str());
+		fprintf(stderr, "[ERROR] START IsGreater %s \n", maxKey.GetBase16().c_str());
 		exit(-1);
+	}
+
+	// ksFinish > maxKey â†’ maxKey'e sinirla (range=256 girilince overflow olabilir)
+	if (bc->ksFinish.IsGreater(&maxKey))
+	{
+		bc->ksFinish.Set(&maxKey);
+		fprintf(stdout, "[INFO] ksFinish secp256k1 sinirina (maxKey) kirpildi\n");
 	}
 
 	if (bc->ksFinish.IsLowerOrEqual(&bc->ksStart))
@@ -279,6 +288,59 @@ void checkKeySpace(BITCRACK_PARAM* bc, Int& maxKey)
 	}
 
 	return;
+}
+
+// Returns true when fileName matches our database.bin layout:
+//   [uint64_t count][count Ã— 20-byte Hash160 entries]
+static bool isBinaryDatabase(const string& fileName) {
+    FILE* fp = fopen(fileName.c_str(), "rb");
+    if (!fp) return false;
+    uint64_t count = 0;
+    bool ok = (fread(&count, sizeof(uint64_t), 1, fp) == 1) && count > 0;
+    if (ok) {
+        fseek(fp, 0, SEEK_END);
+        long sz = ftell(fp);
+        ok = (sz == (long)(8 + count * 20));
+    }
+    fclose(fp);
+    return ok;
+}
+
+// Load a binary database produced by db_creator.exe.
+// Each 20-byte Hash160 entry is Base58Check-encoded to a P2PKH string so that
+// the rest of VanitySearch (initAddress / lookup-table builder) works unchanged.
+static void parseBinaryFile(const string& fileName, vector<string>& lines) {
+    FILE* fp = fopen(fileName.c_str(), "rb");
+    if (!fp) {
+        fprintf(stderr, "[ERROR] parseBinaryFile: cannot open %s (%s)\n",
+                fileName.c_str(), strerror(errno));
+        exit(-1);
+    }
+    uint64_t count = 0;
+    fread(&count, sizeof(uint64_t), 1, fp);
+
+    fprintf(stdout, "[Loading binary database: %llu addresses]\n",
+            (unsigned long long)count);
+    lines.reserve((size_t)count);
+
+    uint8_t payload[25];
+    payload[0] = 0x00; // P2PKH version byte
+
+    for (uint64_t i = 0; i < count; i++) {
+        if (fread(payload + 1, 20, 1, fp) != 1) {
+            fprintf(stderr, "[ERROR] Unexpected EOF at entry %llu\n",
+                    (unsigned long long)i);
+            break;
+        }
+        sha256_checksum(payload, 21, payload + 21);
+        lines.push_back(EncodeBase58(payload, payload + 25));
+
+        if ((i & 0xFFFFF) == 0xFFFFF)
+            fprintf(stdout, "[Loading binary database %5.1f%%]\r",
+                    ((double)(i + 1) * 100.0) / (double)count);
+    }
+    fclose(fp);
+    fprintf(stdout, "[Loading binary database 100.0%%]\n");
 }
 
 void parseFile(string fileName, vector<string>& lines) {
@@ -538,6 +600,25 @@ int main(int argc, char* argv[]) {
 	// Global Init
 	Timer::Init();
 
+	fprintf(stdout,
+		"\n"
+		"  #############################################################\n"
+		"  ##                                                         ##\n"
+		"  ##    _   _ _   _ _    _ _____ _____ ____                  ##\n"
+		"  ##   | | | | | | | \\ | |_   _| ____|  _ \\                ##\n"
+		"  ##   | |_| | | | |  \\| | | | |  _| | |_) |                ##\n"
+		"  ##   |  _  | |_| | | \\ | | | | |___|  _ <                 ##\n"
+		"  ##   |_| |_|\\___/|_|  \\| |_| |_____|_| \\_\\             ##\n"
+		"  ##                                                         ##\n"
+		"  ##      H U N T E R   K E Y S   -  Fork by eharmanli       ##\n"
+		"  ##                                                         ##\n"
+		"  ##   GPU-accelerated 256-bit BTC private-key scanner       ##\n"
+		"  ##   Bloom Filter  |  Random Jump  |  RTX Tuned            ##\n"
+		"  ##                                                         ##\n"
+		"  ##   Based on VanitySearch-Bitcrack v" RELEASE "           ##\n"
+		"  #############################################################\n"
+		"\n");
+
 	// Init SecpK1
 	Secp256K1* secp = new Secp256K1();
 	secp->Init();
@@ -597,9 +678,14 @@ int main(int argc, char* argv[]) {
 		}
 		else if (strcmp(argv[a], "-i") == 0) {
 			a++;
-			parseFile(string(argv[a]), address);
+			{
+				string inputFile = string(argv[a]);
+				if (isBinaryDatabase(inputFile))
+					parseBinaryFile(inputFile, address);
+				else
+					parseFile(inputFile, address);
+			}
 			a++;
-
 		}
 		else if (strcmp(argv[a], "-stop") == 0) {
 			stop = true;
@@ -635,8 +721,6 @@ int main(int argc, char* argv[]) {
 
 	}
 
-	fprintf(stdout, "VanitySearch-Bitcrack v" RELEASE "\n");
-
 	if (gridSize.size() == 0) {
 		for (int i = 0; i < gpuId.size(); i++) {
 			gridSize.push_back(-1);
@@ -653,8 +737,8 @@ int main(int argc, char* argv[]) {
 	std::string firstValue = gpuParsed.substr(0, commaPos);
 	gpuId[0] = std::stoi(firstValue);
 
-	if (range > 255)
-		range = 255;
+	if (range > 256)
+		range = 256;
 
 	Int Range;
 	Range.SetInt32(1);

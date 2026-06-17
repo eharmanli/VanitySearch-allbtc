@@ -80,7 +80,7 @@ int _ConvertSMVer2Cores(int major, int minor) {
 #define GRP_SIZE 1024
 #define STEP_SIZE GRP_SIZE*1
 
-__global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out) {
+__global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, const uint8_t* bloom, uint64_t* keys, uint32_t* out, uint32_t maxFound) {
 
 
     uint64_t* startx = keys + (blockIdx.x * blockDim.x) * 8;
@@ -113,7 +113,7 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
     // Check starting point
     odd_py = sy[0] & 1;
     _GetHash160Comp(sx, odd_py, (uint8_t*)h);
-    CheckPoint(h, GRP_SIZE / 2, sAddress, lookup32, out);
+    CheckPoint(h, GRP_SIZE / 2, sAddress, lookup32, bloom, out, maxFound);
     __syncthreads();
 
     ModSub256(sxn, _2Gnx, sx);
@@ -155,7 +155,7 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
         ModSub256isOdd(py, sy, &odd_py);
 
         _GetHash160Comp(px, odd_py, (uint8_t*)h);
-        CheckPoint(h, GRP_SIZE / 2 + (i + 1), sAddress, lookup32, out);
+        CheckPoint(h, GRP_SIZE / 2 + (i + 1), sAddress, lookup32, bloom, out, maxFound);
 
         //////////////////
 
@@ -171,7 +171,7 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
         ModSub256isOdd(syn, py, &odd_py);
 
         _GetHash160Comp(px, odd_py, (uint8_t*)h);
-        CheckPoint(h, GRP_SIZE / 2 - (i + 1), sAddress, lookup32, out);
+        CheckPoint(h, GRP_SIZE / 2 - (i + 1), sAddress, lookup32, bloom, out, maxFound);
 
         //////////////////
 
@@ -195,7 +195,7 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
     ModSub256isOdd(syn, py, &odd_py);
 
     _GetHash160Comp(px, odd_py, (uint8_t*)h);
-    CheckPoint(h, 0, sAddress, lookup32, out);
+    CheckPoint(h, 0, sAddress, lookup32, bloom, out, maxFound);
 
     //////////////////
 
@@ -278,7 +278,9 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
         return;
     }
 
-    err = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
+    // BlockingSync CPU'yu OS scheduler'a sokar (yavaş).
+    // Spin = CPU aktif bekler, GPU biter bitmez anında tepki → kernel launch gecikmesi azalır.
+    err = cudaSetDeviceFlags(cudaDeviceScheduleSpin);
     if (err != cudaSuccess) {
         fprintf(stderr, "GPUEngine: %s\n", cudaGetErrorString(err));
         return;
@@ -368,6 +370,7 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
     pattern = "";
     hasPattern = false;
     inputAddressLookUp = NULL;
+    inputBloom = NULL;
 
 }
 
@@ -376,8 +379,31 @@ GPUEngine::~GPUEngine() {
     cudaFree(inputKey);
     cudaFree(inputAddress);
     if (inputAddressLookUp) cudaFree(inputAddressLookUp);
+    if (inputBloom) cudaFree(inputBloom);
     cudaFreeHost(outputBufferPinned);
     cudaFree(outputBuffer);
+}
+
+bool GPUEngine::SetBloom(const uint8_t* hostBloom) {
+    if (!hostBloom) return false;
+
+    // 256MB tahsis
+    cudaError_t err = cudaMalloc((void**)&inputBloom, 256ULL * 1024 * 1024);
+    if (err != cudaSuccess) {
+        printf("GPUEngine: SetBloom malloc 256MB: %s\n", cudaGetErrorString(err));
+        inputBloom = NULL;
+        return false;
+    }
+    err = cudaMemcpy(inputBloom, hostBloom, 256ULL * 1024 * 1024, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("GPUEngine: SetBloom memcpy: %s\n", cudaGetErrorString(err));
+        cudaFree(inputBloom);
+        inputBloom = NULL;
+        return false;
+    }
+    printf("[OK] Bloom filter GPU'ya yuklendi (256 MB)\n");
+    fflush(stdout);
+    return true;
 }
 
 
@@ -463,13 +489,15 @@ void GPUEngine::SetPattern(const char* pattern) {
 
 void GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddress) {
 
-    // Allocate memory for the second level of lookup tables
-    cudaError_t err = cudaMalloc((void**)&inputAddressLookUp, (_64K + totalAddress) * 4);
+    // Each lAddress is uint64_t stored as 2 uint32 slots.
+    // Total lookup array size: _64K (offset table) + totalAddress * 2 (lAddress data).
+    uint32_t lookupSlots = _64K + totalAddress * 2;
+    cudaError_t err = cudaMalloc((void**)&inputAddressLookUp, lookupSlots * 4);
     if (err != cudaSuccess) {
         printf("GPUEngine: Allocate address lookup memory: %s\n", cudaGetErrorString(err));
         return;
     }
-    err = cudaHostAlloc(&inputAddressLookUpPinned, (_64K + totalAddress) * 4, cudaHostAllocWriteCombined | cudaHostAllocMapped);
+    err = cudaHostAlloc(&inputAddressLookUpPinned, lookupSlots * 4, cudaHostAllocWriteCombined | cudaHostAllocMapped);
     if (err != cudaSuccess) {
         printf("GPUEngine: Allocate address lookup pinned memory: %s\n", cudaGetErrorString(err));
         return;
@@ -483,18 +511,20 @@ void GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddres
         inputAddressPinned[addresses[i].sAddress] = (uint16_t)nbLAddress;
         inputAddressLookUpPinned[addresses[i].sAddress] = offset;
         for (int j = 0; j < nbLAddress; j++) {
-            inputAddressLookUpPinned[offset++] = addresses[i].lAddresses[j];
+            uint64_t la = addresses[i].lAddresses[j];
+            inputAddressLookUpPinned[offset++] = (uint32_t)(la & 0xFFFFFFFFu);
+            inputAddressLookUpPinned[offset++] = (uint32_t)(la >> 32);
         }
     }
 
-    if (offset != (_64K + totalAddress)) {
-        printf("GPUEngine: Wrong totalAddress %d!=%d!\n", offset - _64K, totalAddress);
+    if (offset != lookupSlots) {
+        printf("GPUEngine: Wrong totalAddress, slots %u != %u\n", offset, lookupSlots);
         return;
     }
 
     // Fill device memory
     cudaMemcpy(inputAddress, inputAddressPinned, _64K * 2, cudaMemcpyHostToDevice);
-    cudaMemcpy(inputAddressLookUp, inputAddressLookUpPinned, (_64K + totalAddress) * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(inputAddressLookUp, inputAddressLookUpPinned, lookupSlots * 4, cudaMemcpyHostToDevice);
 
 
     // We do not need the input pinned memory anymore
@@ -531,16 +561,17 @@ bool GPUEngine::callKernel() {
     cudaMemset(outputBuffer, 0, 4);
 
     comp_keys << < nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP >> >
-        (inputAddress, inputAddressLookUp, inputKey, outputBuffer);
-
-
-
+        (inputAddress, inputAddressLookUp, inputBloom, inputKey, outputBuffer, maxFound);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        printf("GPUEngine: Kernel: %s\n", cudaGetErrorString(err));
+        printf("GPUEngine: Kernel launch: %s\n", cudaGetErrorString(err));
+        fflush(stdout);
         return false;
     }
+
+    // cudaDeviceSynchronize() kaldirildi – PrintStats crash duzeltildi, sync gereksiz
+    // Hata tespiti icin sadece kernel launch hatasini kontrol ediyoruz
 
     //cudaFree(d_dx);
 

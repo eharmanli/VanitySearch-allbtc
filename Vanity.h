@@ -147,7 +147,9 @@ private:
 	std::vector<ADDRESS_TABLE_ITEM> addresses;
 	std::vector<address_t> usedAddress;
 	std::vector<LADDRESS> usedAddressL;
-	std::vector<std::string>& inputAddresses;	
+	std::vector<std::string>& inputAddresses;
+
+	uint8_t* bloomBuf;   // 256MB CPU-side bloom filter (kurulduysa GPU'ya yuklenir)
 
 	BITCRACK_PARAM* bc;
 	void saveProgress(TH_PARAM* p, Int& lastSaveKey, BITCRACK_PARAM* bc);

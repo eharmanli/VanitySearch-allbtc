@@ -39,7 +39,7 @@ static const char *searchModes[] = {"Compressed","Uncompressed","Compressed or U
 	
 //typedef uint16_t address_t;
 typedef uint16_t address_t;
-typedef uint32_t addressl_t;
+typedef uint64_t addressl_t;
 
 typedef struct {
   uint32_t thId;
@@ -64,6 +64,7 @@ public:
   void FreeGPUEngine();
   void SetAddress(std::vector<address_t> addresses);
   void SetAddress(std::vector<LADDRESS> addresses,uint32_t totalAddress);
+  bool SetBloom(const uint8_t* hostBloom);   // 256MB bloom filtresi VRAM'e yukle
   bool SetKeys(Point *p);
   bool SetRandomJump(Point p);
   void SetSearchMode(int searchMode);
@@ -96,6 +97,7 @@ private:
   address_t *inputAddressPinned;
   uint32_t *inputAddressLookUp;
   uint32_t *inputAddressLookUpPinned;
+  uint8_t  *inputBloom;   // 256MB GPU-side bloom filtresi (NULL ise bloom devre disi)
   uint64_t *inputKey;
   uint64_t *inputKeyPinned;
   uint32_t *outputBuffer;

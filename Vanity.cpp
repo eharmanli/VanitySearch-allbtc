@@ -18,6 +18,7 @@
 #include "Vanity.h"
 #include "Base58.h"
 #include "Bech32.h"
+#include "GPU/GPUBloom.h"
 #include "hash/sha256.h"
 #include "hash/sha512.h"
 #include "IntGroup.h"
@@ -29,7 +30,8 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
-#include <ctime> 
+#include <mutex>
+#include <ctime>
 #include <iostream>
 #include <fstream>
 
@@ -39,8 +41,29 @@
 
 using namespace std;
 
-//Point Gn[GRP_SIZE / 2];
-//Point _2Gn;
+// ── Display thread – random mod için paylaşılan durum ──────────────────────
+static std::mutex  g_dispMtx;
+static char        g_dispKey[130] = "?";   // mevcut taranan key (hex)
+static double      g_dispSpeed    = 0.0;
+static double      g_dispLogKeys  = 0.0;
+static double      g_dispRun      = 0.0;
+static int         g_dispFound    = 0;
+static bool        g_dispActive   = false; // display thread çalışıyor mu
+
+static void displayThread() {
+    while (g_dispActive) {
+        {
+            std::lock_guard<std::mutex> lk(g_dispMtx);
+            int h_run = static_cast<int>(g_dispRun) / 3600;
+            int m_run = (static_cast<int>(g_dispRun) % 3600) / 60;
+            int s_run = static_cast<int>(g_dispRun) % 60;
+            printf("%7.1f MK/s | 2^%5.2f | Key: %s | Found: %4d | RUN: %02d:%02d:%02d     \r",
+                g_dispSpeed, g_dispLogKeys, g_dispKey, g_dispFound, h_run, m_run, s_run);
+            fflush(stdout);
+        }
+        Timer::SleepMillis(500);
+    }
+}
 
 VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses, int searchMode,
 	bool stop, string outputFile, uint32_t maxFound, BITCRACK_PARAM* bc):inputAddresses(inputAddresses) 
@@ -55,7 +78,9 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 	this->bc = bc;	
 
 	rseed(static_cast<unsigned long>(time(NULL)));
-	
+
+	bloomBuf = NULL;
+
 	addresses.clear();
 
 	// Create a 65536 items lookup table
@@ -116,24 +141,36 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 		exit(-1);
 	}
 
-	// Second level lookup
+	// Bloom filter icin 256MB tahsis et (VRAM'e yuklenecek)
+	const size_t BLOOM_BYTES = 256ULL * 1024 * 1024;
+	bloomBuf = (uint8_t*)calloc(1, BLOOM_BYTES);
+	if (!bloomBuf) {
+		fprintf(stderr, "[WARN] Bloom filter icin 256MB RAM tahsis edilemedi, klasik binary-search modu kullanilacak.\n");
+	}
+
+	// Second level lookup + Bloom filter insaasi
 	uint32_t unique_sAddress = 0;
 	uint32_t minI = 0xFFFFFFFF;
 	uint32_t maxI = 0;
-	for (int i = 0; i < (int)addresses.size(); i++) 
+	for (int i = 0; i < (int)addresses.size(); i++)
 	{
-		
-		if (addresses[i].items) 
+
+		if (addresses[i].items)
 		{
-			
+
 			LADDRESS lit;
 			lit.sAddress = i;
-			if (addresses[i].items) 
+			if (addresses[i].items)
 			{
-				for (int j = 0; j < (int)addresses[i].items->size(); j++) 
+				for (int j = 0; j < (int)addresses[i].items->size(); j++)
 				{
 					lit.lAddresses.push_back((*addresses[i].items)[j].lAddress);
-					
+
+					// Bloom filtreye hash160'i ekle (5 uint32_t)
+					if (bloomBuf) {
+						const uint32_t* hw = reinterpret_cast<const uint32_t*>((*addresses[i].items)[j].hash160);
+						bloomAdd(bloomBuf, hw);
+					}
 				}
 			}
 
@@ -146,6 +183,11 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 
 		if (loadingProgress)
 			fprintf(stdout, "[Building lookup32 %.1f%%]\r", ((double)i * 100.0) / (double)addresses.size());
+	}
+
+	if (bloomBuf) {
+		fprintf(stdout, "[OK] Bloom filter CPU tarafinda insa edildi (256 MB)\n");
+		fflush(stdout);
 	}
 
 	if (loadingProgress)
@@ -921,6 +963,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		g.SetAddress(usedAddress);
 	}
 
+	// Bloom filter'i GPU'ya yukle (256MB) - en buyuk performans kazanci
+	if (bloomBuf) {
+		g.SetBloom(bloomBuf);
+	}
+
 	Int stepThread;
 	Int taskSize;
 	Int numthread;
@@ -983,6 +1030,24 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				}
 				
 				ok = g.SetRandomJump(RandomJump_P);
+
+				// Display thread icin mevcut key guncelle (daima 64-char temiz hex)
+				{
+					Int curKey;
+					curKey.Set(&bc->ksStart);
+					curKey.Add(&RandomJump_K_tot);
+					// bits64[3..0] = 256-bit sayi, little-endian kelimeler
+					// big-endian hex olarak yaziyoruz: [3][2][1][0]
+					char hexbuf[65];
+					snprintf(hexbuf, sizeof(hexbuf),
+						"%016llX%016llX%016llX%016llX",
+						(unsigned long long)curKey.bits64[3],
+						(unsigned long long)curKey.bits64[2],
+						(unsigned long long)curKey.bits64[1],
+						(unsigned long long)curKey.bits64[0]);
+					std::lock_guard<std::mutex> lk(g_dispMtx);
+					memcpy(g_dispKey, hexbuf, 65);
+				}
 			}
 
 			ok = g.Launch(found, true);
@@ -1043,8 +1108,6 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 		PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
 
-		
-
 		if (keycount.IsGreaterOrEqual(&taskSize) && (!randomMode))
 		{
 			double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0); // Avg speed in MK/s
@@ -1080,54 +1143,56 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 void VanitySearch::PrintStats(uint64_t keys_n, uint64_t keys_n_prev, double ttot, double tprev, Int taskSize, Int keycount) {
 
-	double speed;
+	double speed = 0.0;
 	double perc;
 	double log_keys;
 	double bkeys;
 
-	Int Perc;
-
-	Perc.Set(&taskSize);
-	Perc.Mult(65536);
-	Perc.Div(&keycount);
-
+	// Yüzde hesabı: Int::Div kullanmak yerine ToDouble() ile float bölme
+	double dTaskSize = taskSize.ToDouble();
+	double dKeycount = keycount.ToDouble();
+	perc = (dTaskSize > 0.0) ? (dKeycount / dTaskSize * 100.0) : 0.0;
 
 	if (ttot > tprev) {
-		speed = (keys_n - keys_n_prev) / (ttot - tprev) / 1000000.0; // speed in Mkey/s
+		speed = (keys_n - keys_n_prev) / (ttot - tprev) / 1000000.0;
 	}
 
-
-	perc = (double)(1 / Perc.ToDouble()*100*65536);
-
-
 	log_keys = log2(static_cast<double>(keys_n));
-	bkeys = static_cast<double>(keys_n);
-	bkeys = bkeys / 1000000000;
+	bkeys = static_cast<double>(keys_n) / 1000000000.0;
 
 	int h_run = static_cast<int32_t>(ttot) / 3600;
 	int m_run = (static_cast<int32_t>(ttot) % 3600) / 60;
 	int s_run = static_cast<int32_t>(ttot) % 60;
 	int d_run = static_cast<int32_t>(ttot * 10) % 10;
 
-	double tempo_tot_stimato = ttot / (perc / 100.0);
-	double end_tt = tempo_tot_stimato - ttot;
+	double end_tt = (perc > 0.0 && perc < 100.0) ? (ttot / (perc / 100.0)) - ttot : 0.0;
 
-	int h_end = static_cast<int32_t>(end_tt) / 3600;
-	int m_end = (static_cast<int32_t>(end_tt) % 3600) / 60;
-	int s_end = static_cast<int32_t>(end_tt) % 60;
-	int d_end = static_cast<int32_t>(end_tt * 10) % 10;
+	int h_end = (end_tt > 0.0 && end_tt < 2147483647.0) ? static_cast<int32_t>(end_tt) / 3600 : -1;
+	int m_end = 0, s_end = 0, d_end = 0;
+	if (h_end >= 0) {
+		m_end = (static_cast<int32_t>(end_tt) % 3600) / 60;
+		s_end = static_cast<int32_t>(end_tt) % 60;
+		d_end = static_cast<int32_t>(end_tt * 10) % 10;
+	}
 
 
 
 	if (randomMode) {
 		if (!Paused) {
 
-			printf("%.1f MK/s - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d - Found: %d     ",
-				speed, bkeys, log_keys, perc, h_run, m_run, s_run, d_run, nbFoundKey);
-
+			// Display thread globallerini guncelle (display thread ekrana yazar)
+			{
+				std::lock_guard<std::mutex> lk(g_dispMtx);
+				g_dispSpeed   = speed;
+				g_dispLogKeys = log_keys;
+				g_dispRun     = ttot;
+				g_dispFound   = nbFoundKey;
+			}
+			// Random modda ciziim display thread tarafindan yapilir;
+			// burada yazarsak iki farkli format flip-flop eder.
 		}
 		else {
-			printf("Paused - %.0f Bkeys -  2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d - Found: %d     ",
+			printf("Paused - %9.2f BKeys -  2^%5.2f [%6.2f%%] - RUN: %02d:%02d:%02d.%01d - Found: %d     ",
 				bkeys, log_keys, perc, h_run, m_run, s_run, d_run, nbFoundKey);
 
 			endOfSearch = true;
@@ -1137,14 +1202,14 @@ void VanitySearch::PrintStats(uint64_t keys_n, uint64_t keys_n_prev, double ttot
 		if (!Paused) {
 
 			if (h_end >= 0)
-				printf("%.1f MK/s - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d|END: %02d:%02d:%02d.%01d - Found: %d     ",
+				printf("%7.1f MK/s - %9.2f BKeys - 2^%5.2f [%6.2f%%] - RUN: %02d:%02d:%02d.%01d|END: %02d:%02d:%02d.%01d - Found: %d     ",
 					speed, bkeys, log_keys, perc, h_run, m_run, s_run, d_run, h_end, m_end, s_end, d_end, nbFoundKey);
 			else
-				printf("%.1f MK/s - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d|END: Too much bro - Found: %d     ",
+				printf("%7.1f MK/s - %9.2f BKeys - 2^%5.2f [%6.2f%%] - RUN: %02d:%02d:%02d.%01d|END: Too much bro - Found: %d     ",
 					speed, bkeys, log_keys, perc, h_run, m_run, s_run, d_run, nbFoundKey);
 		}
 		else {
-			printf("Paused - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d|END: %02d:%02d:%02d.%01d - Found: %d     ",
+			printf("Paused - %9.2f BKeys - 2^%5.2f [%6.2f%%] - RUN: %02d:%02d:%02d.%01d|END: %02d:%02d:%02d.%01d - Found: %d     ",
 				bkeys,log_keys, perc, h_run, m_run, s_run, d_run, h_end, m_end, s_end, d_end, nbFoundKey);
 
 			endOfSearch = true;
@@ -1240,6 +1305,13 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 	mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
+	// Display thread'i başlat (random modda key gösterimi)
+	g_dispActive = randomMode;
+	std::thread dispThread;
+	if (randomMode) {
+		dispThread = std::thread(displayThread);
+	}
+
 	// Launch GPU threads
 	for (int i = 0; i < numGPUs; i++) {
 		params[i].obj = this;
@@ -1262,6 +1334,13 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 	}
 
 	
+	// Display thread'i durdur
+	if (randomMode && dispThread.joinable()) {
+		g_dispActive = false;
+		dispThread.join();
+		printf("\n");
+	}
+
 	if (params != nullptr) {
 		free(params);
 	}
