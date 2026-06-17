@@ -38,7 +38,9 @@ This fork includes a highly optimized database creator (`db_creator.cpp`) that c
 Because Legacy (**P2PKH**, starts with `1`) and Native SegWit (**P2WPKH**, starts with `bc1q`) addresses both rely on the exact same 20-byte `Hash160` under the hood, `db_creator` merges them into a single `database.bin` file.
 **This means VanitySearch scans for BOTH Legacy and Native SegWit addresses simultaneously in a single run without any performance penalty!** 
 
-*(P2SH addresses starting with `3` are exported to a separate `database_p2sh.bin` file).*
+**Why did we exclude P2SH (starts with `3`)?**
+To verify a P2SH (Nested SegWit) address, the GPU cannot just use the standard `Hash160(PubKey)`. It must wrap that hash in a redeem script (`0x0014 <Hash160>`) and then perform an entirely **second round** of SHA256 and RIPEMD160 hashing. Doing double hashing on the GPU for every single generated key would have severely crippled our scanning speed. To keep the engine running at absolute maximum speed (6900+ MKeys/s), we deliberately excluded P2SH from the main database. 
+*(If you really want them, `db_creator` exports them to a separate `database_p2sh.bin` file).*
 
 **How to build your database:**
 1.  **Download the data:** Visit [http://addresses.loyce.club/](http://addresses.loyce.club/) and download the latest `Blockchair_Bitcoin_addresses_latest.tsv.gz`. Extract it to get a list of funded addresses.
