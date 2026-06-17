@@ -10,6 +10,7 @@ This is a highly optimized fork of VanitySearch-Bitcrack designed specifically f
 *   **Reduced RAM/VRAM Usage:** Optimized memory footprint for loading massive binary databases (`database.bin`).
 *   **Backup Mode (`-backup`):** Periodically saves progress (every ~60 seconds) during sequential searches. Allows you to resume exactly where you left off if the application closes unexpectedly. (Note: Not applicable in `-random` mode).
 *   **Pause/Resume:** Press the `p` key at any time to pause the search and free up the GPU. Press `p` again to resume.
+*   **Broad GPU Compatibility:** Pre-compiled to support a massive range of NVIDIA architectures including Pascal (GTX 10xx), Turing (RTX 20xx), Ampere (RTX 30xx), Ada Lovelace (RTX 40xx), Hopper (H100), and even the upcoming Blackwell (RTX 50xx).
 
 ## 🛠️ Usage
 
