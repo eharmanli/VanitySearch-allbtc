@@ -34,9 +34,12 @@ VanitySearch.exe [-v] [-gpuId] [-i inputfile] [-o outputfile] [-start HEX] [-ran
 If you want to hunt for active, funded Bitcoin wallets, you need a database of addresses with non-zero balances. You can easily obtain this data and convert it for VanitySearch:
 
 1.  **Download the data:** Visit [http://addresses.loyce.club/](http://addresses.loyce.club/) and download the latest `Blockchair_Bitcoin_addresses_latest.tsv.gz`. This file contains all Bitcoin addresses with a balance.
-2.  **Filter P2PKH addresses:** VanitySearch (by default) scans for compressed P2PKH addresses (starting with `1`). Extract only these addresses from the TSV file.
-3.  **Convert to Binary:** You can use the included `db_creator.cpp` utility (or write a quick Python script) to decode the Base58 addresses into their raw 20-byte `Hash160` format. 
-4.  **Format of `database.bin`:** The binary file must start with an 8-byte `uint64_t` indicating the total count of addresses, followed by the sequential 20-byte Hash160 payloads.
+3.  **Filter for Target Addresses:** VanitySearch is optimized to scan for exactly two address types (all compressed):
+    *   **P2PKH** (Legacy, starting with `1`)
+    *   **P2SH** (Nested SegWit, starting with `3`)
+    Extract only these two types of addresses from the TSV file.
+4.  **Convert to Binary:** You can use the included `db_creator.cpp` utility (or write a quick Python script) to decode the Base58 addresses into their raw 20-byte `Hash160` format. 
+5.  **Format of `database.bin`:** The binary file must start with an 8-byte `uint64_t` indicating the total count of addresses, followed by the sequential 20-byte Hash160 payloads.
 
 ## 📝 Examples
 
