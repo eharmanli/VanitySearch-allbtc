@@ -1,6 +1,6 @@
-# VanitySearch-Bitcrack (eharmanli Fork) - Optimized for BTC Puzzle
+# VanitySearch-allbtc (eharmanli Fork) - Optimized for Mass BTC Wallet Hunting
 
-This is a highly optimized fork of VanitySearch-Bitcrack designed specifically for high-speed scanning of Bitcoin puzzles and large-scale address databases. 
+This is a highly optimized fork of VanitySearch-Bitcrack designed specifically for high-speed scanning of funded Bitcoin wallets and massive large-scale address databases.
 
 ## 🚀 Key Features & Optimizations
 
