@@ -29,17 +29,27 @@ VanitySearch.exe [-v] [-gpuId] [-i inputfile] [-o outputfile] [-start HEX] [-ran
 *   `-backup`: Activates backup mode for sequential scans.
 *   `-stop`: Stops the program automatically when all targeted addresses/prefixes are found.
 
-## 💡 How to obtain funded Bitcoin addresses (database.bin)
+### 💡 Database Creation & Simultaneous Scanning (`db_creator.cpp`)
 
-If you want to hunt for active, funded Bitcoin wallets, you need a database of addresses with non-zero balances. You can easily obtain this data and convert it for VanitySearch:
+This fork includes a highly optimized database creator (`db_creator.cpp`) that converts human-readable Bitcoin addresses from CSV/TSV files into raw binary `Hash160` payloads (`database.bin`).
 
-1.  **Download the data:** Visit [http://addresses.loyce.club/](http://addresses.loyce.club/) and download the latest `Blockchair_Bitcoin_addresses_latest.tsv.gz`. This file contains all Bitcoin addresses with a balance.
-3.  **Filter for Target Addresses:** VanitySearch is optimized to scan for exactly two address types (all compressed):
-    *   **P2PKH** (Legacy, starting with `1`)
-    *   **P2SH** (Nested SegWit, starting with `3`)
-    Extract only these two types of addresses from the TSV file.
-4.  **Convert to Binary:** You can use the included `db_creator.cpp` utility (or write a quick Python script) to decode the Base58 addresses into their raw 20-byte `Hash160` format. 
-5.  **Format of `database.bin`:** The binary file must start with an 8-byte `uint64_t` indicating the total count of addresses, followed by the sequential 20-byte Hash160 payloads.
+**🔥 The "Simultaneous Scan" Advantage:**
+Because Legacy (**P2PKH**, starts with `1`) and Native SegWit (**P2WPKH**, starts with `bc1q`) addresses both rely on the exact same 20-byte `Hash160` under the hood, `db_creator` merges them into a single `database.bin` file.
+**This means VanitySearch scans for BOTH Legacy and Native SegWit addresses simultaneously in a single run without any performance penalty!** 
+
+*(P2SH addresses starting with `3` are exported to a separate `database_p2sh.bin` file).*
+
+**How to build your database:**
+1.  **Download the data:** Visit [http://addresses.loyce.club/](http://addresses.loyce.club/) and download the latest `Blockchair_Bitcoin_addresses_latest.tsv.gz`. Extract it to get a list of funded addresses.
+2.  **Run the Creator:** Compile and run `db_creator.exe` in the same folder as your CSV/TSV files.
+    ```powershell
+    # By default, it looks for "adresler.csv", "bcq1.csv", and "P2SH.csv"
+    .\db_creator.exe
+    
+    # Or specify your own files:
+    .\db_creator.exe -o database.bin -p2sh database_p2sh.bin my_addresses.csv
+    ```
+3.  **Output:** The tool deduplicates the addresses and creates `database.bin` (ready for VanitySearch) and `database_p2sh.bin`.
 
 ## 📝 Examples
 
